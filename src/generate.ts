@@ -5,7 +5,6 @@ import {
   readdirSync,
   statSync,
   lstatSync,
-  realpathSync,
   mkdirSync,
   copyFileSync,
   type Stats,
@@ -240,7 +239,9 @@ function findTurbopackAliases(
 
   const serverDir = join(standaloneNextDir, "server");
   if (existsSync(serverDir)) {
-    const re = /["']([^"'\s/]+-[0-9a-f]{16})(?:\/([^"'\s]+))?["']/g;
+    // Scoped packages mangle to "@scope/name-<hash>", so the alias part may
+    // carry exactly one slash before the hash.
+    const re = /["']((?:@[^"'\s/]+\/)?[^"'\s/]+-[0-9a-f]{16})(?:\/([^"'\s]+))?["']/g;
     for (const f of walkDir(serverDir)) {
       if (!f.absolutePath.endsWith(".js")) continue;
       let content: string;
@@ -259,16 +260,22 @@ function findTurbopackAliases(
 
   const nodeModulesDir = join(standaloneNextDir, "node_modules");
   if (existsSync(nodeModulesDir)) {
-    for (const name of readdirSync(nodeModulesDir)) {
+    // Scoped aliases sit one level down: node_modules/@scope/name-<hash>
+    const entries = readdirSync(nodeModulesDir).flatMap((top) => {
+      if (!top.startsWith("@")) return [top];
+      try {
+        return readdirSync(join(nodeModulesDir, top)).map((sub) => `${top}/${sub}`);
+      } catch {
+        return [];
+      }
+    });
+    for (const name of entries) {
       if (!/-[0-9a-f]{16}$/.test(name)) continue;
       if (seen.has(name)) continue;
       const aliasPath = join(nodeModulesDir, name);
       try {
         if (!lstatSync(aliasPath).isSymbolicLink()) continue;
-        seen.set(name, {
-          target: basename(realpathSync(aliasPath)),
-          subpaths: new Set(),
-        });
+        ensure(name);
       } catch {
         continue;
       }
@@ -1055,7 +1062,7 @@ export function generateEntryPoint(options: GenerateOptions): string {
       // are extracted by collectExternalModules and the hook redirects
       // alias-name requires at runtime, so the alias directory is dead
       // weight if we let it get walked.
-      const m = f.relativePath.replace(/\\/g, "/").match(/^node_modules\/([^/]+)/);
+      const m = f.relativePath.replace(/\\/g, "/").match(/^node_modules\/((?:@[^/]+\/)?[^/]+)/);
       return !(m && aliasNames.has(m[1]));
     })
     .map((f) => ({
