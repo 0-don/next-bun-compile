@@ -33,6 +33,12 @@ export function compile(options: CompileOptions): void {
     entryPoint,
     "--production",
     "--compile",
+    // Since bun 1.3.4 a compiled executable ignores node_modules on disk
+    // unless asked (oven-sh/bun#27058). The extracted tree is a real
+    // node_modules layout that externalized packages resolve their own
+    // dependencies through, ESM imports included, which no runtime hook
+    // can intercept.
+    "--compile-autoload-package-json",
     "--minify",
     "--sourcemap",
     // Dev-only lazy requires inside Next's graph (webpack machinery is
