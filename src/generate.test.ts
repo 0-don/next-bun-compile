@@ -446,6 +446,122 @@ describe("generateEntryPoint", () => {
     expect(entry).toContain('"sharp-457ea9eae1af1a9c":"sharp"');
   });
 
+  test("discovers scoped aliases (@scope/name-<hash>) from chunk literals", () => {
+    // Turbopack mangles scoped packages the same way, keeping the scope:
+    // `@libsql/client` becomes `@libsql/client-6da938047d5fc1cd`. The alias
+    // part then carries one slash before the hash, which the literal scan
+    // must not read as a subpath separator.
+    const root = join(tmpBase, "turbopack-alias-scoped");
+    const distDir = join(root, ".next");
+    const standaloneDir = join(distDir, "standalone");
+    const projectDir = root;
+
+    const chunkPath = ".next/standalone/.next/server/chunks/[turbopack]_runtime.js";
+    scaffold(root, {
+      ".next/required-server-files.json": MOCK_RSF,
+      ".next/BUILD_ID": "test-build-id",
+      ".next/nbc-adapter-outputs.json": mockSnapshot(),
+      ".next/static/app.js": "// static",
+      ".next/standalone/server.js": MOCK_SERVER_JS,
+      ".next/standalone/.next/BUILD_ID": "scoped-alias-build",
+      [chunkPath]:
+        `b.exports=a.x("@libsql/client-6da938047d5fc1cd",()=>require("@libsql/client-6da938047d5fc1cd"));\n` +
+        `let p=await a.y("@libsql/client-6da938047d5fc1cd/lib-cjs/node.js");`,
+      ".next/standalone/node_modules/next/package.json": MOCK_NEXT_PKG,
+      ".next/standalone/node_modules/next/dist/server/require-hook.js": MOCK_REQUIRE_HOOK,
+      ".next/standalone/node_modules/@libsql/client/package.json":
+        JSON.stringify({ name: "@libsql/client", main: "lib-cjs/node.js" }),
+      ".next/standalone/node_modules/@libsql/client/lib-cjs/node.js":
+        "module.exports = {};",
+      "public/favicon.ico": "icon",
+    });
+
+    generateEntryPoint({ standaloneDir, serverDir: standaloneDir, distDir, projectDir });
+
+    const chunk = readFileSync(join(root, chunkPath), "utf-8");
+    expect(chunk).not.toContain("@libsql/client-6da938047d5fc1cd");
+    expect(chunk).toContain('"__NBC_BASE__/.next/node_modules/@libsql/client/lib-cjs/node.js"');
+
+    const entry = readFileSync(join(standaloneDir, "server-entry.js"), "utf-8");
+    expect(entry).toContain('"@libsql/client-6da938047d5fc1cd":"@libsql/client"');
+  });
+
+  test("discovers scoped aliases from build-time symlinks under node_modules/@scope", () => {
+    // The symlink Next creates for a scoped package sits one directory
+    // deeper (.next/node_modules/@libsql/client-<hash>), and its canonical
+    // name needs the scope directory of the realpath, not just its basename.
+    const root = join(tmpBase, "turbopack-alias-scoped-symlink");
+    const distDir = join(root, ".next");
+    const standaloneDir = join(distDir, "standalone");
+    const projectDir = root;
+
+    scaffold(root, {
+      ".next/required-server-files.json": MOCK_RSF,
+      ".next/BUILD_ID": "test-build-id",
+      ".next/nbc-adapter-outputs.json": mockSnapshot(),
+      ".next/static/app.js": "// static",
+      ".next/standalone/server.js": MOCK_SERVER_JS,
+      ".next/standalone/.next/BUILD_ID": "scoped-symlink-build",
+      ".next/standalone/.next/server/chunks/page.js": "module.exports = {};",
+      ".next/standalone/node_modules/next/package.json": MOCK_NEXT_PKG,
+      ".next/standalone/node_modules/next/dist/server/require-hook.js": MOCK_REQUIRE_HOOK,
+      ".next/standalone/node_modules/@libsql/client/package.json":
+        JSON.stringify({ name: "@libsql/client", main: "lib-cjs/node.js" }),
+      ".next/standalone/node_modules/@libsql/client/lib-cjs/node.js":
+        "module.exports = {};",
+      "public/favicon.ico": "icon",
+    });
+    mkdirSync(join(standaloneDir, ".next/node_modules/@libsql"), { recursive: true });
+    symlinkSync(
+      join(standaloneDir, "node_modules/@libsql/client"),
+      join(standaloneDir, ".next/node_modules/@libsql/client-6da938047d5fc1cd")
+    );
+
+    generateEntryPoint({ standaloneDir, serverDir: standaloneDir, distDir, projectDir });
+
+    const entry = readFileSync(join(standaloneDir, "server-entry.js"), "utf-8");
+    expect(entry).toContain('"@libsql/client-6da938047d5fc1cd":"@libsql/client"');
+  });
+
+  test("skips dangling alias symlinks under .next/node_modules", () => {
+    // `turbo prune --docker` (and any prune-after-build flow) can drop the
+    // package a turbopack alias symlink points at, leaving the link dangling.
+    // Deriving the canonical name from the link's own name would register an
+    // alias for a package the build removed on purpose, and the validator
+    // would then report it missing. Nothing references it, so skip it.
+    const root = join(tmpBase, "turbopack-alias-dangling");
+    const distDir = join(root, ".next");
+    const standaloneDir = join(distDir, "standalone");
+    const projectDir = root;
+
+    scaffold(root, {
+      ".next/required-server-files.json": MOCK_RSF,
+      ".next/BUILD_ID": "test-build-id",
+      ".next/nbc-adapter-outputs.json": mockSnapshot(),
+      ".next/static/app.js": "// static",
+      ".next/standalone/server.js": MOCK_SERVER_JS,
+      ".next/standalone/.next/BUILD_ID": "dangling-build",
+      ".next/standalone/.next/server/chunks/page.js": "module.exports = {};",
+      ".next/standalone/node_modules/next/package.json": MOCK_NEXT_PKG,
+      ".next/standalone/node_modules/next/dist/server/require-hook.js": MOCK_REQUIRE_HOOK,
+      "public/favicon.ico": "icon",
+    });
+    mkdirSync(join(standaloneDir, ".next/node_modules/@scope"), { recursive: true });
+    symlinkSync(
+      join(standaloneDir, "node_modules/__pruned__/gone"),
+      join(standaloneDir, ".next/node_modules/gone-fedcba9876543210")
+    );
+    symlinkSync(
+      join(standaloneDir, "node_modules/@scope/__pruned__"),
+      join(standaloneDir, ".next/node_modules/@scope/gone-0123456789abcdef")
+    );
+
+    generateEntryPoint({ standaloneDir, serverDir: standaloneDir, distDir, projectDir });
+
+    const entry = readFileSync(join(standaloneDir, "server-entry.js"), "utf-8");
+    expect(entry).toContain("const __nbcAliases = {}");
+  });
+
   test("validator warns when an alias references a missing canonical package", () => {
     // Chunk references `missing-pkg-deadbeefdeadbeef` but no `missing-pkg`
     // is installed anywhere in the standalone. The build still has to run
