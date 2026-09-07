@@ -562,6 +562,141 @@ describe("generateEntryPoint", () => {
     expect(entry).toContain("const __nbcAliases = {}");
   });
 
+  test("resolves canonical entries through the exports map", () => {
+    // unpdf has no `main`: its entry is only reachable through `exports`,
+    // and the traced tree holds just the `.mjs` variant. shiki's subpaths
+    // live under dist/ behind conditional targets ("./core" → dist/core.mjs).
+    const root = join(tmpBase, "turbopack-alias-exports");
+    const distDir = join(root, ".next");
+    const standaloneDir = join(distDir, "standalone");
+    const projectDir = root;
+
+    const chunkPath = ".next/standalone/.next/server/chunks/ssr/page.js";
+    scaffold(root, {
+      ".next/required-server-files.json": MOCK_RSF,
+      ".next/BUILD_ID": "test-build-id",
+      ".next/nbc-adapter-outputs.json": mockSnapshot(),
+      ".next/static/app.js": "// static",
+      ".next/standalone/server.js": MOCK_SERVER_JS,
+      ".next/standalone/.next/BUILD_ID": "exports-build",
+      [chunkPath]:
+        `let a=await x.y("unpdf-968ffb9b8a880814");` +
+        `let b=await x.y("shiki-43d062b67f27bbdc/core");` +
+        `let c=await x.y("shiki-43d062b67f27bbdc/engine/oniguruma");`,
+      ".next/standalone/node_modules/next/package.json": MOCK_NEXT_PKG,
+      ".next/standalone/node_modules/next/dist/server/require-hook.js": MOCK_REQUIRE_HOOK,
+      ".next/standalone/node_modules/unpdf/package.json": JSON.stringify({
+        name: "unpdf",
+        exports: {
+          ".": {
+            import: { types: "./dist/index.d.mts", default: "./dist/index.mjs" },
+            require: { types: "./dist/index.d.cts", default: "./dist/index.cjs" },
+          },
+        },
+      }),
+      ".next/standalone/node_modules/unpdf/dist/index.mjs": "export {};",
+      ".next/standalone/node_modules/shiki/package.json": JSON.stringify({
+        name: "shiki",
+        exports: {
+          ".": "./dist/index.mjs",
+          "./core": { unwasm: "./dist/core-unwasm.mjs", default: "./dist/core.mjs" },
+          "./engine/*": "./dist/engine-*.mjs",
+        },
+      }),
+      ".next/standalone/node_modules/shiki/dist/index.mjs": "export {};",
+      ".next/standalone/node_modules/shiki/dist/core.mjs": "export {};",
+      ".next/standalone/node_modules/shiki/dist/engine-oniguruma.mjs": "export {};",
+      "public/favicon.ico": "icon",
+    });
+
+    generateEntryPoint({ standaloneDir, serverDir: standaloneDir, distDir, projectDir });
+
+    const chunk = readFileSync(join(root, chunkPath), "utf-8");
+    expect(chunk).toContain('"__NBC_BASE__/.next/node_modules/unpdf/dist/index.mjs"');
+    expect(chunk).toContain('"__NBC_BASE__/.next/node_modules/shiki/dist/core.mjs"');
+    expect(chunk).toContain('"__NBC_BASE__/.next/node_modules/shiki/dist/engine-oniguruma.mjs"');
+    expect(chunk).not.toContain("unpdf-968ffb9b8a880814");
+    expect(chunk).not.toContain("shiki-43d062b67f27bbdc");
+  });
+
+  test("a dual package keeps resolving through main, not the import target", () => {
+    // findFile keeps the first candidate that exists, so exports-map targets
+    // have to come AFTER the `main` heuristics. Leading with them re-points
+    // every dual package that resolves today at its other half — handing a
+    // `require` site the `import` build. Verified against real unpdf, whose
+    // main (./dist/index.cjs) and exports.import (./dist/index.mjs) are both
+    // present in a full install.
+    const root = join(tmpBase, "turbopack-alias-dual");
+    const distDir = join(root, ".next");
+    const standaloneDir = join(distDir, "standalone");
+    const projectDir = root;
+    const chunkPath = ".next/standalone/.next/server/chunks/[turbopack]_runtime.js";
+    const pkg = JSON.stringify({
+      name: "dual",
+      main: "dist/index.cjs",
+      exports: {
+        ".": { import: "./dist/index.mjs", require: "./dist/index.cjs" },
+      },
+    });
+
+    scaffold(root, {
+      ".next/required-server-files.json": MOCK_RSF,
+      ".next/BUILD_ID": "test-build-id",
+      ".next/nbc-adapter-outputs.json": mockSnapshot(),
+      ".next/static/app.js": "// static",
+      ".next/standalone/server.js": MOCK_SERVER_JS,
+      ".next/standalone/.next/BUILD_ID": "dual-build",
+      [chunkPath]: `a.x("dual-1234567890abcdef",()=>require("dual-1234567890abcdef"));`,
+      ".next/standalone/node_modules/next/package.json": MOCK_NEXT_PKG,
+      ".next/standalone/node_modules/next/dist/server/require-hook.js": MOCK_REQUIRE_HOOK,
+      ".next/standalone/node_modules/dual/package.json": pkg,
+      ".next/standalone/node_modules/dual/dist/index.cjs": "module.exports = {};",
+      ".next/standalone/node_modules/dual/dist/index.mjs": "export default {};",
+      "public/favicon.ico": "icon",
+    });
+
+    generateEntryPoint({ standaloneDir, serverDir: standaloneDir, distDir, projectDir });
+
+    const chunk = readFileSync(join(root, chunkPath), "utf-8");
+    expect(chunk).toContain("dual/dist/index.cjs");
+    expect(chunk).not.toContain("dual/dist/index.mjs");
+  });
+
+  test("a dual package falls back to exports when main was never traced", () => {
+    // Same package with the .cjs half absent, as a trace of an ESM-only app
+    // leaves it: main points at a file that was never copied, so the exports
+    // fallback is the only thing that can still resolve it.
+    const root = join(tmpBase, "turbopack-alias-dual-pruned");
+    const distDir = join(root, ".next");
+    const standaloneDir = join(distDir, "standalone");
+    const projectDir = root;
+    const chunkPath = ".next/standalone/.next/server/chunks/[turbopack]_runtime.js";
+
+    scaffold(root, {
+      ".next/required-server-files.json": MOCK_RSF,
+      ".next/BUILD_ID": "test-build-id",
+      ".next/nbc-adapter-outputs.json": mockSnapshot(),
+      ".next/static/app.js": "// static",
+      ".next/standalone/server.js": MOCK_SERVER_JS,
+      ".next/standalone/.next/BUILD_ID": "dual-pruned-build",
+      [chunkPath]: `await a.y("dual-1234567890abcdef");`,
+      ".next/standalone/node_modules/next/package.json": MOCK_NEXT_PKG,
+      ".next/standalone/node_modules/next/dist/server/require-hook.js": MOCK_REQUIRE_HOOK,
+      ".next/standalone/node_modules/dual/package.json": JSON.stringify({
+        name: "dual",
+        main: "dist/index.cjs",
+        exports: { ".": { import: "./dist/index.mjs", require: "./dist/index.cjs" } },
+      }),
+      ".next/standalone/node_modules/dual/dist/index.mjs": "export default {};",
+      "public/favicon.ico": "icon",
+    });
+
+    generateEntryPoint({ standaloneDir, serverDir: standaloneDir, distDir, projectDir });
+
+    const chunk = readFileSync(join(root, chunkPath), "utf-8");
+    expect(chunk).toContain("dual/dist/index.mjs");
+  });
+
   test("validator warns when an alias references a missing canonical package", () => {
     // Chunk references `missing-pkg-deadbeefdeadbeef` but no `missing-pkg`
     // is installed anywhere in the standalone. The build still has to run
