@@ -301,6 +301,57 @@ function findTurbopackAliases(
  *   "<alias>"          → ".next/node_modules/<target>/<resolvedMain>"
  *   "<alias>/<sub>"    → ".next/node_modules/<target>/<resolvedSub>"
  */
+/**
+ * Every file an `exports` map can hand out for one subpath, in condition
+ * order, so the caller can keep the first one that exists on disk. The
+ * traced tree holds only the variant the app used (often just the `.mjs`),
+ * and a package without `main` (unpdf) or with subpaths that live under
+ * `dist/` (shiki/core) is invisible to the plain-filename heuristics.
+ */
+const EXPORT_CONDITIONS = ["node", "import", "module", "default", "require"];
+
+function exportsCandidates(exportsField: unknown, subpath: string): string[] {
+  if (!exportsField) return [];
+  const out: string[] = [];
+  const leaves = (target: unknown, replacement: string | null) => {
+    if (typeof target === "string") {
+      const file = replacement === null ? target : target.replace("*", replacement);
+      out.push(file.replace(/^\.\//, ""));
+    } else if (Array.isArray(target)) {
+      for (const t of target) leaves(t, replacement);
+    } else if (target && typeof target === "object") {
+      const obj = target as Record<string, unknown>;
+      for (const c of EXPORT_CONDITIONS) if (c in obj) leaves(obj[c], replacement);
+      for (const [k, v] of Object.entries(obj)) {
+        if (!EXPORT_CONDITIONS.includes(k) && !k.startsWith(".")) leaves(v, replacement);
+      }
+    }
+  };
+  const isSubpathMap =
+    typeof exportsField === "object" &&
+    !Array.isArray(exportsField) &&
+    Object.keys(exportsField as object).some((k) => k.startsWith("."));
+  if (!isSubpathMap) {
+    if (subpath === ".") leaves(exportsField, null);
+    return out;
+  }
+  const map = exportsField as Record<string, unknown>;
+  if (subpath in map) {
+    leaves(map[subpath], null);
+    return out;
+  }
+  for (const [key, target] of Object.entries(map)) {
+    const star = key.indexOf("*");
+    if (star === -1) continue;
+    const prefix = key.slice(0, star);
+    const suffix = key.slice(star + 1);
+    if (subpath.startsWith(prefix) && subpath.endsWith(suffix) && subpath.length >= key.length - 1) {
+      leaves(target, subpath.slice(prefix.length, subpath.length - suffix.length));
+    }
+  }
+  return out;
+}
+
 function buildCanonicalResolutions(
   externalRoot: string,
   aliases: Array<{ alias: string; target: string; subpaths: string[] }>
@@ -314,27 +365,32 @@ function buildCanonicalResolutions(
     }
     return null;
   };
-  const resolveMain = (canonicalDir: string): string | null => {
-    const pkgPath = join(canonicalDir, "package.json");
-    let main = "index.js";
-    if (existsSync(pkgPath)) {
-      try {
-        const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
-        if (typeof pkg.main === "string") main = pkg.main;
-      } catch {}
+  const readPkg = (canonicalDir: string): Record<string, unknown> => {
+    try {
+      return JSON.parse(readFileSync(join(canonicalDir, "package.json"), "utf-8"));
+    } catch {
+      return {};
     }
+  };
+  const resolveMain = (canonicalDir: string): string | null => {
+    const pkg = readPkg(canonicalDir);
+    const main = typeof pkg.main === "string" ? pkg.main : "index.js";
     return findFile(canonicalDir, [
+      ...exportsCandidates(pkg.exports, "."),
       main, main + ".js", main + ".cjs", main + ".mjs",
       join(main, "index.js"), join(main, "index.cjs"), join(main, "index.mjs"),
+      ...(typeof pkg.module === "string" ? [pkg.module] : []),
       "index.js", "index.cjs", "index.mjs",
     ]);
   };
   const resolveSub = (canonicalDir: string, sub: string): string | null => {
     const stripped = sub.replace(/\.(?:js|cjs|mjs|json)$/, "");
-    // Try direct file forms first; for ESM contexts (.y/import calls) the
-    // `.mjs` variant of subpath exports is what's actually on disk for many
-    // packages (prettier/plugins/html.mjs vs html.js).
+    // Exports-map targets first, then direct file forms; for ESM contexts
+    // (.y/import calls) the `.mjs` variant of subpath exports is what's
+    // actually on disk for many packages (prettier/plugins/html.mjs vs html.js).
     return findFile(canonicalDir, [
+      ...exportsCandidates(readPkg(canonicalDir).exports, "./" + sub),
+      ...exportsCandidates(readPkg(canonicalDir).exports, "./" + stripped),
       sub,
       stripped + ".mjs",
       stripped + ".js",
