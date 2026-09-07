@@ -87,10 +87,12 @@ challenging in a compiled binary:
    `require("sharp-457ea9eae1af1a9c")` in chunks, with a build-time
    symlink at `.next/node_modules/sharp-457... → sharp`. The
    compiled binary has no node_modules tree pre-baked.
-2. **Bun's compiled-binary resolver quirk.** From inside an extracted
-   `node_modules` entry (e.g. `sharp/lib/sharp.js`), bun's resolver
-   in compiled-binary mode doesn't reliably walk up to find sibling
-   packages.
+2. **Bun's compiled-binary resolver.** Since bun 1.3.4 a compiled
+   executable does not consult `node_modules` on disk unless built with
+   `--compile-autoload-package-json`, which next-bun-compile passes. With
+   it, an extracted package (e.g. `sharp/lib/sharp.js`) resolves its own
+   dependencies from the extracted tree, ESM imports included. The CJS
+   hook below still covers the cases bun's resolver rejects.
 
 ### Two mechanisms
 
