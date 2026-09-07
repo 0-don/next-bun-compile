@@ -376,21 +376,29 @@ function buildCanonicalResolutions(
     const pkg = readPkg(canonicalDir);
     const main = typeof pkg.main === "string" ? pkg.main : "index.js";
     return findFile(canonicalDir, [
-      ...exportsCandidates(pkg.exports, "."),
       main, main + ".js", main + ".cjs", main + ".mjs",
       join(main, "index.js"), join(main, "index.cjs"), join(main, "index.mjs"),
       ...(typeof pkg.module === "string" ? [pkg.module] : []),
       "index.js", "index.cjs", "index.mjs",
+      // Last, not first. findFile keeps the first candidate that exists, so
+      // leading with exports would re-point every dual package that resolves
+      // through `main` today at its other half — picking the `import` target
+      // for a `require` site. As a fallback it only reaches packages nothing
+      // else could resolve: no `main`, or a `main` the trace never copied.
+      ...exportsCandidates(pkg.exports, "."),
     ]);
   };
   const resolveSub = (canonicalDir: string, sub: string): string | null => {
     const stripped = sub.replace(/\.(?:js|cjs|mjs|json)$/, "");
-    // Exports-map targets first, then direct file forms; for ESM contexts
-    // (.y/import calls) the `.mjs` variant of subpath exports is what's
-    // actually on disk for many packages (prettier/plugins/html.mjs vs html.js).
+    // Direct file forms first; for ESM contexts (.y/import calls) the `.mjs`
+    // variant of subpath exports is what's actually on disk for many packages
+    // (prettier/plugins/html.mjs vs html.js). Exports-map targets come last,
+    // for the same reason as in resolveMain: they must not re-point a subpath
+    // that already resolves, only reach the ones that don't (shiki's ./core
+    // lives at dist/core.mjs, which no plain-filename guess finds). Read once
+    // — this ran readPkg twice per subpath.
+    const pkgExports = readPkg(canonicalDir).exports;
     return findFile(canonicalDir, [
-      ...exportsCandidates(readPkg(canonicalDir).exports, "./" + sub),
-      ...exportsCandidates(readPkg(canonicalDir).exports, "./" + stripped),
       sub,
       stripped + ".mjs",
       stripped + ".js",
@@ -399,6 +407,8 @@ function buildCanonicalResolutions(
       join(stripped, "index.mjs"),
       join(stripped, "index.js"),
       join(stripped, "index.cjs"),
+      ...exportsCandidates(pkgExports, "./" + sub),
+      ...exportsCandidates(pkgExports, "./" + stripped),
     ]);
   };
   for (const { alias, target, subpaths } of aliases) {
